@@ -1,0 +1,133 @@
+<div class="terminal-container">
+    <div id="terminal"></div>
+    <div id="status" class="alert alert-warning">Connecting...</div>
+</div>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.1.0/css/xterm.min.css">
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.1.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.7.0/lib/xterm-addon-fit.min.js"></script>
+
+<style>
+.terminal-container {
+    display: flex;
+    flex-direction: column;
+    height: 70vh;
+    background: #000;
+    border-radius: 5px;
+    overflow: hidden;  /* Добавлено для предотвращения скролла */
+}
+
+#terminal {
+    flex-grow: 1;
+    padding: 10px;
+    width: 100%;  /* Добавлено для правильного растягивания */
+}
+
+.xterm .xterm-screen canvas {
+    border-radius: 5px;  /* Скругление углов внутри терминала */
+}
+</style>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const term = new Terminal({
+        fontSize: 14,
+        fontFamily: 'monospace',
+        cursorBlink: true,
+        scrollback: 1000,
+        tabStopWidth: 8,
+        cols: 120,  /* Увеличенное количество колонок */
+        rows: 30,
+        theme: {
+            background: '#000000',
+            foreground: '#f0f0f0'
+        },
+        allowTransparency: true,
+        disableStdin: false,
+        screenReaderMode: false,
+        convertEol: true,
+        wrap: false  /* 🔴 ОТКЛЮЧАЕМ ПЕРЕНОС СТРОК */
+    });
+    
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(document.getElementById('terminal'));
+    
+    // Оптимизированная функция подгонки размеров
+    function fitTerminal() {
+        try {
+            fitAddon.fit();
+            term.scrollToBottom();
+        } catch (e) {
+            console.warn("Fit error:", e);
+        }
+    }
+    
+    // Первоначальная настройка размеров
+    fitTerminal();
+    
+    // Обработчик изменения размеров окна
+    const resizeObserver = new ResizeObserver(fitTerminal);
+    resizeObserver.observe(document.getElementById('terminal'));
+
+    const statusEl = document.getElementById('status');
+    let socket;
+    
+    function connect() {
+        statusEl.textContent = "Connecting...";
+        statusEl.className = "alert alert-warning";
+        
+        socket = new WebSocket(`ws://${window.location.hostname}:8765/`);
+        
+        socket.onopen = () => {
+            statusEl.textContent = "Connected";
+            statusEl.className = "alert alert-success";
+            setTimeout(() => statusEl.style.display = 'none', 2000);
+            
+            const userId = "test_user";
+            socket.send(JSON.stringify({ 
+                user_id: userId,
+                cols: term.cols,
+                rows: term.rows
+            }));
+        };
+        
+        socket.onmessage = (e) => {
+            term.write(e.data);
+        };
+        
+        socket.onclose = () => {
+            statusEl.style.display = 'block';
+            statusEl.textContent = "Disconnected. Reconnecting...";
+            statusEl.className = "alert alert-danger";
+            setTimeout(connect, 2000);
+        };
+        
+        socket.onerror = (e) => {
+            console.error("WebSocket error:", e);
+            statusEl.textContent = "Connection error";
+            statusEl.className = "alert alert-danger";
+        };
+    }
+    
+    // Обработка ввода с клавиатуры
+    term.onData(data => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(data);
+        }
+    });
+    
+    // Обработка изменения размеров терминала
+    term.onResize((size) => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+                type: 'resize',
+                cols: size.cols,
+                rows: size.rows
+            }));
+        }
+    });
+    
+    connect();
+});
+</script>
