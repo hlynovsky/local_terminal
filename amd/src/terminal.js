@@ -1,7 +1,11 @@
-define(['jquery'], function($) {
+// terminal.js
+var TerminalModule = (function() {
+    function init() {
+        console.log('Terminal module initialized');
+        // Дополнительная логика
+    }
+
     return {
-        init: function() {
-            // Дополнительная инициализация если требуется
-        }
+        init: init
     };
-});
+})();

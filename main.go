@@ -1,3 +1,4 @@
+// main.go
 package main
 
 import (
@@ -37,20 +38,18 @@ var (
 	upgrader = websocket.Upgrader{
 		ReadBufferSize:  readBufferSize,
 		WriteBufferSize: writeBufferSize,
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
+		CheckOrigin:     func(r *http.Request) bool { return true },
 	}
 	activePods sync.Map
 )
 
 type TerminalSession struct {
-	wsConn      *websocket.Conn
-	sizeChan    chan remotecommand.TerminalSize
-	doneChan    chan struct{}
-	k8sClient   *kubernetes.Clientset
-	podName     string
-	namespace   string
+	wsConn    *websocket.Conn
+	sizeChan  chan remotecommand.TerminalSize
+	doneChan  chan struct{}
+	k8sClient *kubernetes.Clientset
+	podName   string
+	namespace string
 }
 
 func generatePodName(userID string) string {
@@ -66,8 +65,10 @@ func generatePodName(userID string) string {
 
 func getKubernetesConfig() (*rest.Config, error) {
 	if config, err := rest.InClusterConfig(); err == nil {
+		log.Println("Using in-cluster Kubernetes config")
 		return config, nil
 	}
+	log.Println("Using kubeconfig file for Kubernetes config")
 	return clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
 }
 
@@ -94,6 +95,7 @@ func (t *TerminalSession) Next() *remotecommand.TerminalSize {
 func (t *TerminalSession) Read(p []byte) (int, error) {
 	_, message, err := t.wsConn.ReadMessage()
 	if err != nil {
+		log.Printf("Error reading WebSocket message: %v", err)
 		return 0, err
 	}
 	return copy(p, message), nil
@@ -102,6 +104,7 @@ func (t *TerminalSession) Read(p []byte) (int, error) {
 func (t *TerminalSession) Write(p []byte) (int, error) {
 	err := t.wsConn.WriteMessage(websocket.TextMessage, p)
 	if err != nil {
+		log.Printf("Error writing WebSocket message: %v", err)
 		return 0, err
 	}
 	return len(p), nil
@@ -117,7 +120,7 @@ func (t *TerminalSession) Close() error {
 	})
 }
 
-func (t *TerminalSession) WaitForPodRunning(ctx context.Context) error {
+func (t *TerminalSession) WaitForPodReady(ctx context.Context) error {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -129,8 +132,13 @@ func (t *TerminalSession) WaitForPodRunning(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			if pod.Status.Phase == corev1.PodRunning {
-				return nil
+			if pod.Status.Phase != corev1.PodRunning {
+				continue
+			}
+			for _, cond := range pod.Status.Conditions {
+				if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+					return nil
+				}
 			}
 		}
 	}
@@ -171,7 +179,6 @@ func createPod(ctx context.Context, client *kubernetes.Clientset, podName string
 	return err
 }
 
-
 func createPodWithRetry(ctx context.Context, client *kubernetes.Clientset, podName string, maxRetries int) error {
 	var lastErr error
 	for i := 0; i < maxRetries; i++ {
@@ -184,8 +191,7 @@ func createPodWithRetry(ctx context.Context, client *kubernetes.Clientset, podNa
 				return nil
 			}
 			lastErr = err
-			if statusErr, ok := err.(*errors.StatusError); ok && 
-			   statusErr.ErrStatus.Reason == metav1.StatusReasonAlreadyExists {
+			if statusErr, ok := err.(*errors.StatusError); ok && statusErr.ErrStatus.Reason == metav1.StatusReasonAlreadyExists {
 				podName = generatePodName(podName)
 				continue
 			}
@@ -199,38 +205,28 @@ func deletePodSafe(client *kubernetes.Clientset, podName string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	deletePolicy := metav1.DeletePropagationBackground
-	err := client.CoreV1().Pods("default").Delete(ctx, podName, metav1.DeleteOptions{
+	client.CoreV1().Pods("default").Delete(ctx, podName, metav1.DeleteOptions{
 		PropagationPolicy: &deletePolicy,
 	})
-	if err != nil {
-		log.Printf("Error deleting pod %s: %v", podName, err)
-	} else {
-		log.Printf("Successfully deleted pod: %s", podName)
-	}
 }
 
 func cleanupPods() {
-	log.Println("Starting cleanup of orphaned pods...")
 	config, err := getKubernetesConfig()
 	if err != nil {
-		log.Printf("Cleanup failed to get config: %v", err)
 		return
 	}
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		log.Printf("Cleanup failed to create clientset: %v", err)
 		return
 	}
 	pods, err := clientset.CoreV1().Pods("default").List(context.Background(), metav1.ListOptions{
 		LabelSelector: "app=terminal-pod",
 	})
 	if err != nil {
-		log.Printf("Cleanup failed to list pods: %v", err)
 		return
 	}
 	for _, pod := range pods.Items {
 		if _, ok := activePods.Load(pod.Name); !ok {
-			log.Printf("Cleaning up orphaned pod: %s", pod.Name)
 			deletePodSafe(clientset, pod.Name)
 		}
 	}
@@ -239,7 +235,6 @@ func cleanupPods() {
 func handleTerminal(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("WebSocket upgrade failed: %v", err)
 		return
 	}
 	defer conn.Close()
@@ -247,53 +242,41 @@ func handleTerminal(w http.ResponseWriter, r *http.Request) {
 	var msg struct {
 		UserID string `json:"user_id"`
 	}
-	if err := conn.ReadJSON(&msg); err != nil {
-		log.Printf("Failed to read user ID: %v", err)
-		return
-	}
-
-	if msg.UserID == "" {
-		log.Printf("Empty user_id received")
+	if err := conn.ReadJSON(&msg); err != nil || msg.UserID == "" {
 		return
 	}
 
 	config, err := getKubernetesConfig()
 	if err != nil {
-		log.Printf("Failed to get Kubernetes config: %v", err)
 		return
 	}
-
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		log.Printf("Failed to create clientset: %v", err)
 		return
 	}
 
 	podName := generatePodName(msg.UserID)
-	log.Printf("Creating pod: %s for user: %s", podName, msg.UserID)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	if err := createPodWithRetry(ctx, clientset, podName, 3); err != nil {
-		log.Printf("Failed to create pod after retries: %v", err)
 		return
 	}
-
 	defer func() {
 		deletePodSafe(clientset, podName)
 		activePods.Delete(podName)
 	}()
-
 	activePods.Store(podName, struct{}{})
 
 	session := NewTerminalSession(conn, clientset, podName)
 	defer session.Close()
 
-	if err := session.WaitForPodRunning(ctx); err != nil {
-		log.Printf("Error waiting for pod: %v", err)
+	if err := session.WaitForPodReady(ctx); err != nil {
 		return
 	}
+
+	// ✨ Сигнал клиенту: pod готов
+	conn.WriteJSON(map[string]string{"status": "ready"})
 
 	req := clientset.CoreV1().RESTClient().Post().
 		Resource("pods").
@@ -310,26 +293,20 @@ func handleTerminal(w http.ResponseWriter, r *http.Request) {
 
 	executor, err := remotecommand.NewSPDYExecutor(config, "POST", req.URL())
 	if err != nil {
-		log.Printf("Failed to create executor: %v", err)
 		return
 	}
 
-	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+	executor.StreamWithContext(ctx, remotecommand.StreamOptions{
 		Stdin:             session,
 		Stdout:            session,
 		Stderr:            session,
 		Tty:               true,
 		TerminalSizeQueue: session,
 	})
-
-	if err != nil {
-		log.Printf("Terminal session error: %v", err)
-	}
 }
 
 func main() {
 	cleanupPods()
-
 	server := &http.Server{
 		Addr:    serverPort,
 		Handler: http.HandlerFunc(handleTerminal),
@@ -340,13 +317,9 @@ func main() {
 		sigint := make(chan os.Signal, 1)
 		signal.Notify(sigint, syscall.SIGINT, syscall.SIGTERM)
 		<-sigint
-
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		
-		if err := server.Shutdown(ctx); err != nil {
-			log.Printf("HTTP server shutdown error: %v", err)
-		}
+		server.Shutdown(ctx)
 		cleanupPods()
 		close(done)
 	}()
@@ -356,5 +329,4 @@ func main() {
 		log.Fatalf("HTTP server error: %v", err)
 	}
 	<-done
-	log.Println("🛑 Server shutdown complete")
 }
