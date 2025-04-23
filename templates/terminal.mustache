@@ -5,17 +5,36 @@
   <title>Web Terminal with xterm.js</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css" />
   <style>
-    body { margin: 0; background: #1e1e1e; color: #fff; }
-    #terminal { height: 100vh; width: 100vw; }
+    body { margin: 0; background: #1e1e1e; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; }
+    #terminal-container {
+      resize: both;
+      overflow: auto;
+      border: 2px solid #444;
+      width: 800px;
+      height: 500px;
+      min-width: 300px;
+      min-height: 200px;
+    }
+    #terminal {
+      width: 100%;
+      height: 100%;
+    }
   </style>
 </head>
 <body>
-  <div id="terminal"></div>
+  <div id="terminal-container">
+    <div id="terminal"></div>
+  </div>
 
   <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
   <script>
     const term = new Terminal();
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+
     term.open(document.getElementById('terminal'));
+    fitAddon.fit(); // первый раз подогнать
 
     const userID = "student123";
     const ws = new WebSocket("ws://83.220.170.151:8765/terminal");
@@ -29,7 +48,6 @@
     ws.onmessage = (event) => {
       const data = event.data;
 
-      // Если это JSON — проверим статус
       try {
         const parsed = JSON.parse(data);
         if (parsed.status === "ready") {
@@ -39,7 +57,6 @@
         }
       } catch (_) {}
 
-      // Обработка вывода: убираем мусор
       const clean = stripAnsiArtifacts(data);
       term.write(clean);
     };
@@ -51,12 +68,8 @@
     });
 
     function stripAnsiArtifacts(text) {
-      // Удаляем OSC последовательности (например: ESC ]0;... BEL)
       text = text.replace(/\x1b\]0;.*?\x07/g, '');
-
-      // Удаляем режим bracketed paste (ESC[?2004h / ESC[?2004l)
       text = text.replace(/\x1b\[\?2004[hl]/g, '');
-
       return text;
     }
 
@@ -67,6 +80,13 @@
     ws.onerror = (err) => {
       term.write(`\r\n❌ WebSocket error: ${err.message || err}\r\n`);
     };
+
+    // Автоматическая подгонка при изменении размеров
+    const container = document.getElementById('terminal-container');
+    const resizeObserver = new ResizeObserver(() => {
+      fitAddon.fit();
+    });
+    resizeObserver.observe(container);
   </script>
 </body>
 </html>
