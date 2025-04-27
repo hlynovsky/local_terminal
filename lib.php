@@ -1,26 +1,22 @@
 <?php
-function local_terminal_get_k8s_config() {
-    return [
-        'namespace' => 'moodle-terminal',
-        'image' => 'ubuntu:latest',
-        'service_account' => 'moodle-terminal'
-    ];
+function terminal_supports($feature) {
+    switch($feature) {
+        case FEATURE_MOD_INTRO: return true;
+        case FEATURE_SHOW_DESCRIPTION: return true;
+        default: return null;
+    }
+}
+function terminal_add_instance($data) {
+    global $DB;
+    $data->timecreated = time();
+    $data->timemodified = time();
+    return $DB->insert_record('terminal', $data);
 }
 
-function local_terminal_create_pod($userid) {
-    $plugin_path = __DIR__;
-    $template = file_get_contents("$plugin_path/k8s/pod-template.yaml");
-    
-    $config = local_terminal_get_k8s_config();
-    $placeholders = [
-        '{{USER_ID}}' => $userid,
-        '{{NAMESPACE}}' => $config['namespace'],
-        '{{IMAGE}}' => $config['image']
-    ];
-    
-    return str_replace(
-        array_keys($placeholders),
-        array_values($placeholders),
-        $template
-    );
+function terminal_update_instance($data) {
+    global $DB;
+    $data->timemodified = time();
+    $data->id = $data->instance;
+    return $DB->update_record('terminal', $data);
 }
+
